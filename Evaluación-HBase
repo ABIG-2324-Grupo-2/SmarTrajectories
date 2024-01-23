@@ -1,0 +1,155 @@
+########################################################################
+#  ARQUTECTURA BIG DATA - Proyecto SmartTrajectories – Trayectorias4D  #
+#                                                                      #
+#  Evaluación - código relacionado con HBase                           #
+#                                                                      #
+#  Grupo 2                                                             # 
+# ---------------------------------------------------------------------#
+# Sergio Agudelo Bernal                                                #
+# Miguel Ángel Collado Alonso                                          #
+# José María Lozano Olmedo                                             #
+########################################################################
+
+###################################################
+# Creación de las tablas HBase en Hive
+# Ejecutado en consola Hive de Hue
+###################################################
+
+CREATE TABLE gold_zone.trayectorias_hbase (
+    id STRING,
+    callsign STRING,
+    hexid STRING,
+    aerolinea STRING,
+    origen STRING,
+    prigen STRING,
+    destino STRING,
+    pdestino STRING,
+    salida_plan BIGINT,
+    salida_real BIGINT,
+    llegada_plan BIGINT,
+    llegada_real BIGINT
+) STORED BY 'org.apache.hadoop.hive.hbase.HBaseStorageHandler'
+WITH SERDEPROPERTIES (
+    "hbase.columns.mapping" = "
+        :key,
+        trayectoria:callsign,
+        trayectoria:hexid,
+        trayectoria:aerolinea,
+        salida:origen,
+        salida:prigen,
+        llegada:destino,
+        llegada:pdestino,
+        salida:salida_plan,
+        salida:salida_real,
+        llegada:llegada_plan,
+        llegada:llegada_real
+    ") 
+TBLPROPERTIES ("hbase.table.name" = "trayectorias");
+
+CREATE TABLE gold_zone.vectores_hbase (
+    id STRING,
+    trayectoria STRING,
+    en_tierra BOOLEAN,
+    latitud DECIMAL(7,5),
+    longitud DECIMAL(8,5),
+    altitud DECIMAL(6,0),
+    track DECIMAL(5,2),
+    velocidad DECIMAL(6,2),
+    velocidad_vert DECIMAL(5,0)
+) STORED BY 'org.apache.hadoop.hive.hbase.HBaseStorageHandler'
+WITH SERDEPROPERTIES (
+    "hbase.columns.mapping" = "
+        :key,
+        estado:trayectoria,
+        estado:en_tierra,
+        posicion:latitud,
+        posicion:longitud,
+        posicion:altitud,
+        posicion:track,
+        movimiento:velocidad,
+        movimiento:velocidad_vert
+    ") 
+TBLPROPERTIES ("hbase.table.name" = "vectores");
+
+###################################################
+# Inserción de datos en tablas HBase
+# Ejecutado en consola Hive de Hue
+###################################################
+
+INSERT INTO TABLE gold_zone.trayectorias_hbase
+SELECT
+    CONCAT(fecha,':',id),
+    callsign,
+    hexid,
+    aerolinea,
+    origen,
+    prigen,
+    destino, 
+    pdestino, 
+    salida_plan, 
+    salida_real, 
+    llegada_plan,
+    llegada_real
+FROM gold_zone.trayectorias;
+
+INSERT INTO TABLE gold_zone.vectores_hbase
+SELECT
+    concat_ws('-', fecha, id, md5(llave_vector)) as id,
+    trayectoria,
+    en_tierra,
+    latitud,
+    longitud,
+    altitud,
+    track,
+    velocidad,
+    velocidad_vert 
+FROM (
+    SELECT *, concat_ws('-',
+                cast(trayectoria as string),
+                cast(latitud as string),
+                cast(longitud as string),
+                cast(altitud as string),
+                cast(velocidad as string),
+                cast(velocidad_vert as string),
+                cast(track as string),
+                cast(en_tierra as string)
+                ) as llave_vector
+    FROM gold_zone.vectores
+) a;
+
+###################################################
+# Consultas en shell de HBase
+# Ejecutado mediante $ hbase shell
+###################################################
+
+- Mostrar toda la información de las trayectorias disponibles, pero en orden inverso (es decir mostrando la información ordenada del último día al primero).
+
+hbase> scan 'trayectorias', {REVERSED => true}
+
+-	Realizar un scan completo devolviendo todas las métricas globales del escaneo. 
+
+hbase> scan 'trayectorias', {ALL_METRICS => true}
+
+- Obtener (en una única consulta) todos los vuelos que han tenido lugar el día 12 de noviembre de 2023 y todos aquellos que han tenido lugar el día 14 de noviembre de 2023 (hacedlo de manera genérica, suponiendo que tuvieseis datos capturados para el 12 de noviembre). 
+
+hbase> scan 'trayectorias', {FILTER => "PrefixFilter('2023-11-12') OR PrefixFilter('2023-11-14')"}
+
+- Obtener todos los vuelos que han tenido lugar desde el día 13 de noviembre de 2023 hasta el último día disponible para el que haya datos en la tabla (hacedlo de manera genérica, suponiendo que no conocemos ese último día hasta el que hay datos disponibles).
+hbase> scan 'trayectorias', {FILTER => "RowFilter(>=, 'binary:2023-11-13')"}
+
+- Obtener todos los vuelos del 14 de noviembre de 2023 con destino Francia exceptuando aquellos que hayan salido del aeropuerto de Madrid Barajas.
+
+hbase> scan 'trayectorias', {ROWPREFIXFILTER => '2023-11-13', FILTER => "SingleColumnValueFilter('llegada', 'pdestino', =, 'binary:France') AND SingleColumnValueFilter('salida', 'origen', !=, 'binary:Madrid Barajas Airport')"}
+
+-	Obtener los vuelos que llegaron al aeropuerto de Madrid-Barajas el 13 de noviembre de 2023 entre las 9 y las 11 de la mañana.
+
+hbase> scan 'trayectorias', {FILTER => "SingleColumnValueFilter('llegada', 'destino', =, 'binary:Madrid Barajas Airport') AND SingleColumnValueFilter('llegada', 'llegada_real', >= 'binary:1699862400') AND SingleColumnValueFilter('llegada', 'llegada_real', <= 'binary:1699869600')"}
+
+-	Obtener todos los vuelos que llegaron a algún aeropuerto con la cadena de texto "Paris" como parte de nombre del aeropuerto.
+
+hbase> scan 'trayectorias', {FILTER => "SingleColumnValueFilter('llegada', 'destino', =, 'substring:Paris')"}
+
+
+
+
+
