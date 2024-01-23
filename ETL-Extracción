@@ -10,3 +10,80 @@
 # José María Lozano Olmedo                                             #
 ########################################################################
 
+###################################################
+# Configuración del fichero opensky.conf 
+# Ubicación: /usr/lib/flume-ng
+###################################################
+
+agentopensky.sources = sourceos
+agentopensky.channels = channelos
+agentopensky.sinks = sinkos
+
+agentopensky.sources.sourceos.type = boeing.brte.opensky.OpenSkyFlumeSource
+agentopensky.sources.sourceos.url = https://opensky-network.org/api/states/all
+agentopensky.sources.sourceos.user = clouderaGrupo2
+agentopensky.sources.sourceos.password = Grupo2ABD2023
+agentopensky.sources.sourceos.channels = channelos
+
+agentopensky.channels.channelos.type = file
+agentopensky.channels.channelos.checkpointDir = /var/lib/flume-ng/file-channel/checkpoint
+agentopensky.channels.channelos.dataDirs = /var/lib/flume-ng/file-channel/data
+agentopensky.channels.channelos.checkpointInterval = 30000
+agentopensky.channels.channelos.capacity = 1000000
+agentopensky.channels.channelos.transactionCapacity = 10000
+
+agentopensky.sinks.sinkos.type = hdfs
+agentopensky.sinks.sinkos.channel = channelos
+agentopensky.sinks.sinkos.hdfs.path = /user/cloudera/OpenSky/date=%Y-%m-%d
+agentopensky.sinks.sinkos.hdfs.filePrefix = OpenSky
+agentopensky.sinks.sinkos.hdfs.fileSuffix = .json
+agentopensky.sinks.sinkos.hdfs.rollSize = 268435456
+agentopensky.sinks.sinkos.hdfs.rollInterval = 0
+agentopensky.sinks.sinkos.hdfs.rollCount = 0
+agentopensky.sinks.sinkos.hdfs.idleTimeout = 1800
+agentopensky.sinks.sinkos.hdfs.useLocalTimeStamp = true
+agentopensky.sinks.sinkos.hdfs.fileType = DataStream
+agentopensky.sinks.sinkos.hdfs.batchSize = 10
+
+###################################################
+# Despliegue del fichero .jar
+# Ubicación: /usr/lib/flume-ng
+###################################################
+
+cd /usr/lib/flume-ng/ 
+sudo mkdir -p plugins.d/opensky/lib 
+sudo cp ~/materiales-ingestion-datos/OpenSkyFlumeSource-0.0.1-SNAPSHOT.jar plugins.d/opensky/lib 
+
+###################################################
+# Instalación del certificado
+# Ubicación: /usr/lib/flume-ng
+###################################################
+
+cd /usr/lib/flume-ng/ 
+sudo cp ~/materiales-ingestion-datos/opensky-networkorg.crt . 
+sudo keytool -import -noprompt -trustcacerts -alias opensky -file opensky-networkorg.crt -keystore cacerts.jks  
+
+###################################################
+# Creación de directorios del canal FLUME
+# Ubicación: /usr/lib/flume-ng
+###################################################
+
+sudo mkdir -p /var/lib/flume-ng/file-channel/checkpoint 
+sudo mkdir -p /var/lib/flume-ng/file-channel/data 
+sudo chown -R cloudera /var/lib/flume-ng/file-channel 
+sudo chgrp -R cloudera /var/lib/flume-ng/file-channel 
+
+###################################################
+# Creación de directorio HDFS
+# Ubicación: /user/cloudera/OpenSky 
+###################################################
+
+hadoop fs -mkdir /user/cloudera/OpenSky 
+
+###################################################
+# Ejecución del agente flume
+# Ubicación: /usr/lib/flume-ng
+###################################################
+
+cd /usr/lib/flume-ng  
+flume-ng agent -n agentopensky -f opensky.conf -Djavax.net.ssl.trustStore=cacerts.jks -Dhttps.protocols=TLSv1.2 
