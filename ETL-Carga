@@ -10,3 +10,251 @@
 # José María Lozano Olmedo                                             #
 ########################################################################
 
+
+###################################################
+# Script act_bd para utilizar en Oozie
+###################################################
+
+ALTER TABLE p_trayectorias4d.t1_mensajes 
+	ADD IF NOT EXISTS PARTITION (fecha='${hivevar:fecha}') 
+	LOCATION '${hivevar:proyecto}/t1_messages/${hivevar:fecha}';
+ALTER TABLE p_trayectorias4d.t1_planes 
+	ADD IF NOT EXISTS PARTITION (fecha='${hivevar:fecha}') 
+	LOCATION '${hivevar:proyecto}/t1_planes/${hivevar:fecha}';
+	
+DROP VIEW p_trayectorias4d.v2_mensajes;
+CREATE VIEW p_trayectorias4d.v2_mensajes AS
+	SELECT /*+ MAPJOIN(p) */ 
+		m.id, m.tstamp, m.callsign, m.hexid, 
+		m.latitud, m.longitud, m.altitud, m.velocidad, m.velocidad_vert, 
+		m.track, m.en_tierra,
+		p.id AS trayectoria, p.salida_real AS salida, p.llegada_real AS llegada,
+		'${hivevar:fecha}' AS fechapart
+	FROM (SELECT * FROM p_trayectorias4d.t1_mensajes WHERE fecha = '${hivevar:fecha}') m LEFT OUTER JOIN
+	     (SELECT * FROM p_trayectorias4d.t1_planes WHERE fecha = '${hivevar:fecha}') p
+	ON p.callsign = m.callsign 		
+	UNION ALL
+	SELECT /*+ MAPJOIN(p) */ 
+		m.id, m.tstamp, m.callsign, m.hexid, 
+		m.latitud, m.longitud, m.altitud, m.velocidad, m.velocidad_vert, 
+		m.track, m.en_tierra,
+		p.id AS trayectoria, p.salida_real AS salida, p.llegada_real AS llegada,
+		'${hivevar:ayer}' AS fechapart
+	FROM p_trayectorias4d.t2_mensajes_pendientes m JOIN p_trayectorias4d.t1_planes p ON 
+		p.callsign = m.callsign AND 
+		m.fecha = '${hivevar:ayer}' AND 
+		p.fecha = '${hivevar:fecha}';
+		
+ALTER TABLE p_trayectorias4d.t2_mensajes_pendientes
+	ADD IF NOT EXISTS PARTITION (fecha='${hivevar:fecha}') 
+	LOCATION '${hivevar:proyecto}/t2_mensajes_pendientes/${hivevar:fecha}';
+ALTER TABLE p_trayectorias4d.t2_mensajes_procesados
+	ADD IF NOT EXISTS PARTITION (fecha='${hivevar:fecha}') 
+	LOCATION '${hivevar:proyecto}/t2_mensajes_procesados/${hivevar:fecha}';
+	
+ALTER TABLE gold_zone.vectores
+	ADD IF NOT EXISTS PARTITION (fecha='${hivevar:fecha}') 
+	LOCATION '${hivevar:gold}/vectores/${hivevar:fecha}';
+ALTER TABLE gold_zone.trayectorias
+	ADD IF NOT EXISTS PARTITION (fecha='${hivevar:fecha}') 
+	LOCATION '${hivevar:gold}/trayectorias/${hivevar:fecha}';
+
+##########################################################
+# Script para normalizar mensajes para utilizar en Oozie
+#########################################################
+
+INSERT OVERWRITE DIRECTORY '${hivevar:proyecto}/t1_messages/${hivevar:fecha}'
+ROW FORMAT DELIMITED FIELDS TERMINATED BY ',' STORED AS TEXTFILE
+SELECT CONCAT(callsign,'-',UNIX_TIMESTAMP(tstamp)) AS id, UNIX_TIMESTAMP(tstamp), 
+       callsign, hexid, latitud, longitud, 
+       CASE WHEN altitud > 0 THEN altitud 
+            WHEN altitud < 0 AND en_tierra = TRUE THEN 0
+            ELSE NULL END as altitud, 
+       velocidad, 
+       CASE WHEN en_tierra = TRUE THEN 0 ELSE velocidad_vert END as velocidad_vert, 
+       track, en_tierra
+FROM landing_zone.mensajes2023 
+WHERE fecha='${hivevar:fecha}' AND hexid IS NOT NULL AND callsign IS NOT NULL;
+
+##########################################################
+# Script para normalizar planes para utilizar en Oozie
+##########################################################
+
+INSERT OVERWRITE DIRECTORY '${hivevar:proyecto}/t1_planes/${hivevar:fecha}'
+ROW FORMAT DELIMITED FIELDS TERMINATED BY ',' STORED AS TEXTFILE
+SELECT CONCAT(callsign,'-',UNIX_TIMESTAMP(salida_plan, 'yyyy-MM-dd.S')) AS id, 
+       UPPER(callsign), aerolinea, UPPER(origen), UPPER(destino),
+       UNIX_TIMESTAMP(salida_plan, 'yyyy-MM-dd.S'), UNIX_TIMESTAMP(salida_real, 'yyyy-MM-dd.S'),
+       UNIX_TIMESTAMP(llegada_plan, 'yyyy-MM-dd.S'), UNIX_TIMESTAMP(llegada_real, 'yyyy-MM-dd.S')
+FROM landing_zone.planes2023
+WHERE fecha='${hivevar:fecha}' AND 
+      callsign IS NOT NULL AND 
+      origen IS NOT NULL AND destino IS NOT NULL AND (origen LIKE "LE%" OR destino LIKE "LE%") AND
+      salida_plan IS NOT NULL AND llegada_plan IS NOT NULL;
+
+##########################################################
+# Script para procesar mensajes para utilizar en Oozie
+##########################################################
+
+FROM p_trayectorias4d.v2_mensajes
+		INSERT OVERWRITE DIRECTORY '${hivevar:proyecto}/t2_mensajes_pendientes/${hivevar:fecha}'
+			ROW FORMAT DELIMITED FIELDS TERMINATED BY ',' STORED AS TEXTFILE
+				SELECT * WHERE trayectoria IS NULL AND fechapart = '${hivevar:fecha}'
+		INSERT OVERWRITE DIRECTORY '${hivevar:proyecto}/t2_mensajes_procesados/${hivevar:fecha}'
+			ROW FORMAT DELIMITED FIELDS TERMINATED BY ',' STORED AS TEXTFILE
+				SELECT * WHERE trayectoria IS NOT NULL AND (tstamp <= llegada+${hivevar:limite}) AND (tstamp >= salida-${hivevar:limite});
+
+#######################################################################
+# Script para mapear los mensajes en vectores de la goldzone 
+# para utilizar en Oozie
+#######################################################################
+
+INSERT OVERWRITE DIRECTORY '${hivevar:gold}/vectores/${hivevar:fecha}'
+ROW FORMAT DELIMITED FIELDS TERMINATED BY ',' STORED AS TEXTFILE
+SELECT id, tstamp, latitud, longitud, altitud, velocidad, velocidad_vert, track, en_tierra, trayectoria
+FROM p_trayectorias4d.t2_mensajes_procesados
+WHERE fecha ='${hivevar:fecha}'
+SORT BY trayectoria, tstamp;
+
+#######################################################################
+# Script para mapear los planes en trayectorias de la goldzone
+# para utilizar en Oozie
+#######################################################################
+
+INSERT OVERWRITE DIRECTORY '${hivevar:gold}/trayectorias/${hivevar:fecha}'
+ROW FORMAT DELIMITED FIELDS TERMINATED BY ',' STORED AS TEXTFILE
+SELECT p.id, p.callsign, sc.hexid, 
+	   a.nombre, origen.nombre, origen.pais, destino.nombre, destino.pais,
+	   p.salida_plan, p.salida_real, p.llegada_plan, p.llegada_real
+FROM ( 
+       SELECT trayectoria, hexid
+       FROM p_trayectorias4d.t2_mensajes_procesados
+       WHERE fecha ='${hivevar:fecha}'
+       GROUP BY trayectoria, hexid
+) sc, p_trayectorias4d.t1_planes p,
+  landing_zone.aeropuertos origen, 
+  landing_zone.aeropuertos destino,
+  landing_zone.aerolineas a
+WHERE p.id = sc.trayectoria AND p.origen = origen.icao AND p.destino = destino.icao AND p.aerolinea = a.icao
+ORDER BY p.id
+
+#######################################################################
+# Fichero de configuración job.propiertes para utilizar en Oozie
+#######################################################################
+
+oozie.use.system.libpath=true
+
+landing=/user/cloudera/datalake/landing
+gold=/user/cloudera/datalake/gold
+proyecto=/user/cloudera/datalake/work/projects/trayectorias4d
+
+limite=600
+
+#######################################################################
+# Fichero del workflow para utilizar en Oozie
+#######################################################################
+
+<workflow-app name="trayectoria4d" xmlns="uri:oozie:workflow:0.5">
+	<start to="act_bd"/>
+	<action name="act_bd">
+		<hive2 xmlns="uri:oozie:hive2-action:0.1">
+			<job-tracker>${jobTracker}</job-tracker>
+			<name-node>${nameNode}</name-node>
+			<jdbc-url>jdbc:hive2://quickstart.cloudera:10000</jdbc-url>
+			<script>scripts/act_bd</script>
+			<param>landing=${landing}</param>
+			<param>proyecto=${proyecto}</param>
+			<param>gold=${gold}</param>
+			<param>fecha=${fecha}</param>
+			<param>ayer=${ayer}</param>
+		</hive2>
+	    <ok to="normalizar"/>
+    	<error to="fallo"/>
+	</action>
+	
+	<fork name="normalizar">
+        	<path start="norm_mensajes"/>
+        	<path start="norm_planes"/>
+	</fork>
+	
+	<action name="norm_mensajes">
+		<hive2 xmlns="uri:oozie:hive2-action:0.1">
+			<job-tracker>${jobTracker}</job-tracker>
+			<name-node>${nameNode}</name-node>
+			<jdbc-url>jdbc:hive2://quickstart.cloudera:10000</jdbc-url>
+			<script>scripts/norm_mensajes</script>
+			<param>proyecto=${proyecto}</param>
+			<param>fecha=${fecha}</param>
+		</hive2>
+	    <ok to="fin_normalizar"/>
+    	<error to="fallo"/>
+	</action>
+	
+	<action name="norm_planes">
+		<hive2 xmlns="uri:oozie:hive2-action:0.1">
+			<job-tracker>${jobTracker}</job-tracker>
+			<name-node>${nameNode}</name-node>
+			<jdbc-url>jdbc:hive2://quickstart.cloudera:10000</jdbc-url>
+			<script>scripts/norm_planes</script>
+			<param>proyecto=${proyecto}</param>
+			<param>fecha=${fecha}</param>
+		</hive2>
+	    <ok to="fin_normalizar"/>
+    	<error to="fallo"/>
+	</action>
+
+	<join name="fin_normalizar" to="proces_mensajes"/>
+	
+	<action name="proces_mensajes">
+		<hive2 xmlns="uri:oozie:hive2-action:0.1">
+			<job-tracker>${jobTracker}</job-tracker>
+			<name-node>${nameNode}</name-node>
+			<jdbc-url>jdbc:hive2://quickstart.cloudera:10000</jdbc-url>
+			<script>scripts/proces_mensajes</script>
+			<param>proyecto=${proyecto}</param>
+			<param>fecha=${fecha}</param>
+			<param>limite=${limite}</param>
+		</hive2>
+	    <ok to="map_resultados"/>
+    	<error to="fallo"/>
+	</action>
+	
+	<fork name="map_resultados">
+        	<path start="map_mensajes"/>
+        	<path start="map_planes"/>
+	</fork>
+	
+	<action name="map_mensajes">
+		<hive2 xmlns="uri:oozie:hive2-action:0.1">
+			<job-tracker>${jobTracker}</job-tracker>
+			<name-node>${nameNode}</name-node>
+			<jdbc-url>jdbc:hive2://quickstart.cloudera:10000</jdbc-url>
+			<script>scripts/map_mensajes</script>
+			<param>gold=${gold}</param>
+			<param>fecha=${fecha}</param>
+		</hive2>
+	    <ok to="fin_mapear"/>
+    	<error to="fallo"/>
+	</action>
+	
+	<action name="map_planes">
+		<hive2 xmlns="uri:oozie:hive2-action:0.1">
+			<job-tracker>${jobTracker}</job-tracker>
+			<name-node>${nameNode}</name-node>
+			<jdbc-url>jdbc:hive2://quickstart.cloudera:10000</jdbc-url>
+			<script>scripts/map_planes</script>
+			<param>gold=${gold}</param>
+			<param>fecha=${fecha}</param>
+		</hive2>
+	    <ok to="fin_mapear"/>
+    	<error to="fallo"/>
+	</action>
+	
+	<join name="fin_mapear" to="exito"/>
+
+	<kill name="fallo">
+		<message>Se ha producido el siguiente error: [${wf:errorMessage(wf:lastErrorNode())}]</message>
+	</kill>
+	
+	<end name="exito"/>
+</workflow-app>
