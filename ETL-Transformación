@@ -10,3 +10,250 @@
 # José María Lozano Olmedo                                             #
 ########################################################################
 
+###################################################
+# Script opensky-json2csv.sh para la transformación
+# de los ficheros en formato .json a .csv
+# Ejecutar ./opensky-json2csv.sh <carpeta con ficheros .json> 
+###################################################
+
+for f in $(ls $1); do 
+	echo "Procesando $1/$f" 
+	sed 's/{\"time\":[0-9]*,\"states\":\[\[//g' $1/$f > $1/$f.csv 
+	sed -i 's/\]\]//g' $1/$f.csv 
+	sed -i 's/\],\[/\n/g' $1/$f.csv 
+	sed -i 's/\"//g' $1/$f.csv 
+	rm $1/$f 
+done 
+
+###################################################
+# Carga de los ficheros extraidos de OpenSky en HDFS
+# En nuestra estrutura del datalake
+###################################################
+
+hadoop fs -put datos/mensajes/* /user/cloudera/datalake/landing/messages
+hadoop fs -put datos/planesvuelo/* /user/cloudera/datalake/landing/flightplans
+
+###################################################
+# Carga de los ficheros extraidos de OpenSky en HDFS
+# En nuestra estrutura del datalake
+###################################################
+
+
+########################################################
+# Creación de la estructura de la zona Landing en HIVE  
+########################################################
+
+
+CREATE DATABASE landing_zone;
+
+############## Tablas ##############
+
+CREATE EXTERNAL TABLE landing_zone.aeropuertos (
+	nombre STRING, 
+	iata STRING,
+	icao STRING, 
+	lat  STRING, 
+	lon  STRING,
+	pais STRING, 
+	altura STRING
+) 
+ROW FORMAT DELIMITED FIELDS TERMINATED BY ',' 
+LINES TERMINATED BY '\n' STORED AS TEXTFILE
+LOCATION '/user/cloudera/datalake/landing/airports';
+
+CREATE EXTERNAL TABLE landing_zone.aerolineas (
+	nombre STRING, 
+	iata STRING,
+	icao STRING
+) 
+ROW FORMAT DELIMITED FIELDS TERMINATED BY ','
+LINES TERMINATED BY '\n' STORED AS TEXTFILE
+LOCATION '/user/cloudera/datalake/landing/airlines';
+
+CREATE TABLE `landing_zone`.`planes2023` 
+( 
+`aerolinea` string , 
+`origen` string , 
+`destino` string , 
+`callsign` string , 
+`icao24` string , 
+`salida_plan` bigint , 
+`salida` bigint , 
+`llegada_plan` bigint , 
+`llegada` bigint 
+) 
+PARTITIONED BY ( fecha string ) 
+ROW FORMAT DELIMITED FIELDS TERMINATED BY ',' 
+COLLECTION ITEMS TERMINATED BY '\n' 
+STORED AS TextFile 
+
+CREATE EXTERNAL TABLE landing_zone.mensajes2023 ( 
+  icao24 STRING, 
+  callsign STRING, 
+  pais STRING,  
+  time_position BIGINT, 
+  last_contact BIGINT, 
+  longitud DECIMAL(8,5), 
+  latitud DECIMAL(7,5), 
+  altitud_baro DECIMAL(11,6), 
+  en_tierra BOOLEAN, 
+  velocidad DECIMAL(6,2), 
+  track DECIMAL(5,2), 
+  velocidad_vert DECIMAL(5,0), 
+  sensores STRING, 
+  altitud DECIMAL(6,0), 
+  squawk STRING, 
+  spi BOOLEAN, 
+  origen INT 
+)  
+PARTITIONED by (fecha STRING) 
+ROW FORMAT DELIMITED FIELDS TERMINATED BY ',' 
+LINES TERMINATED BY '\n' STORED AS TEXTFILE
+
+
+############## Particiones ##############
+
+ALTER TABLE landing_zone.mensajes2023 ADD IF NOT EXISTS PARTITION (fecha='2023-11-13') LOCATION '/user/cloudera/datalake/landing/messages/2023-11-13';
+ALTER TABLE landing_zone.mensajes2023 ADD IF NOT EXISTS PARTITION (fecha='2023-11-14') LOCATION '/user/cloudera/datalake/landing/messages/2023-11-14';
+	
+ALTER TABLE landing_zone.planes2023 ADD IF NOT EXISTS PARTITION (fecha='2023-11-13') LOCATION '/user/cloudera/datalake/landing/flightplans/2023-11-13';
+ALTER TABLE landing_zone.planes2023 ADD IF NOT EXISTS PARTITION (fecha='2023-11-14') LOCATION '/user/cloudera/datalake/landing/flightplans/2023-11-14';
+
+
+########################################################
+# Creación de la estructura de la Working Zone en HIVE  
+########################################################
+
+CREATE DATABASE p_trayectorias4d; ## Nuestra working:zone
+
+############## Tablas #################
+
+CREATE EXTERNAL TABLE p_trayectorias4d.t1_mensajes (
+	id STRING,
+	tstamp BIGINT,
+	callsign STRING,
+	hexid STRING,
+	latitud DECIMAL(7,5),
+	longitud DECIMAL(8,5),
+	altitud DECIMAL(6,0),
+	velocidad DECIMAL(6,2),
+	velocidad_vert DECIMAL(5,0),
+	track DECIMAL(5,2),
+	en_tierra BOOLEAN
+) 
+PARTITIONED by (fecha STRING)
+ROW FORMAT DELIMITED FIELDS TERMINATED BY ','
+LINES TERMINATED BY '\n' STORED AS TEXTFILE;
+
+CREATE EXTERNAL TABLE p_trayectorias4d.t1_planes (
+	id STRING,
+	callsign STRING,
+	aerolinea STRING,
+	origen STRING, 
+	destino STRING,
+	salida_plan BIGINT,
+	salida_real BIGINT,
+	llegada_plan BIGINT,	
+	llegada_real BIGINT	
+) 
+PARTITIONED by (fecha STRING)
+ROW FORMAT DELIMITED FIELDS TERMINATED BY ','
+LINES TERMINATED BY '\n' STORED AS TEXTFILE;
+
+CREATE EXTERNAL TABLE p_trayectorias4d.t2_mensajes_pendientes (
+	id STRING,
+	tstamp BIGINT,
+	callsign STRING,
+	hexid STRING,
+	latitud DECIMAL(7,5),
+	longitud DECIMAL(8,5),
+	altitud DECIMAL(6,0),
+	velocidad DECIMAL(6,2),
+	velocidad_vert DECIMAL(5,0),
+	track DECIMAL(5,2),
+	en_tierra BOOLEAN
+) 
+PARTITIONED by (fecha STRING)
+ROW FORMAT DELIMITED FIELDS TERMINATED BY ','
+LINES TERMINATED BY '\n' STORED AS TEXTFILE;
+
+CREATE EXTERNAL TABLE p_trayectorias4d.t2_mensajes_procesados (
+	id STRING,
+	tstamp BIGINT,
+	callsign STRING,
+	hexid STRING,
+	latitud DECIMAL(7,5),
+	longitud DECIMAL(8,5),
+	altitud DECIMAL(6,0),
+	velocidad DECIMAL(6,2),
+	velocidad_vert DECIMAL(5,0),
+	track DECIMAL(5,2),
+	en_tierra BOOLEAN,
+	trayectoria STRING
+) 
+PARTITIONED by (fecha STRING)
+ROW FORMAT DELIMITED FIELDS TERMINATED BY ','
+LINES TERMINATED BY '\n' STORED AS TEXTFILE;
+
+
+########################################################
+# Creación de la estructura de la Gold Zone en HIVE  
+########################################################
+
+CREATE DATABASE gold_zone;
+
+############## Tablas ##############
+
+CREATE EXTERNAL TABLE gold_zone.vectores (
+	id STRING,
+	tstamp BIGINT,
+	latitud DECIMAL(7,5),
+	longitud DECIMAL(8,5),
+	altitud DECIMAL(6,0),
+	velocidad DECIMAL(6,2),
+	velocidad_vert DECIMAL(5,0),
+	track DECIMAL(5,2),
+	en_tierra BOOLEAN,
+	trayectoria STRING
+) 
+PARTITIONED by (fecha STRING)
+ROW FORMAT DELIMITED FIELDS TERMINATED BY ','
+LINES TERMINATED BY '\n' STORED AS TEXTFILE;
+
+CREATE EXTERNAL TABLE gold_zone.trayectorias (
+	id STRING,
+	callsign STRING,
+	hexid STRING,
+	aerolinea STRING,
+	origen STRING, 
+	prigen STRING, 
+	destino STRING,
+	pdestino STRING,
+	salida_plan BIGINT,
+	salida_real BIGINT,
+	llegada_plan BIGINT,	
+	llegada_real BIGINT		
+) 
+PARTITIONED by (fecha STRING)
+ROW FORMAT DELIMITED FIELDS TERMINATED BY ','
+LINES TERMINATED BY '\n' STORED AS TEXTFILE;
+
+########################################################
+# Carga de los datos desde HDFS a HIVE  
+########################################################
+
+LOAD DATA INPATH '/user/cloudera/datalake/landing/flightplans/2023-11-14' 
+INTO TABLE p_trayectorias4d.planes2023 
+PARTITION (fecha = '2023-11-14'); 
+ 
+LOAD DATA INPATH '/user/cloudera/datalake/landing/flightplans/2023-11-13'
+INTO TABLE p_trayectorias4d.planes2023 
+PARTITION (fecha = '2023-11-13'); 
+ 
+LOAD DATA INPATH '/user/cloudera/datalake/landing/messages/2023-11-14' 
+INTO TABLE landing_zone.mensajes2023 
+PARTITION (fecha = '2023-11-14'); 
+
+LOAD DATA INPATH '/user/cloudera/datalake/landing/messages/2023-11-13' 
+INTO TABLE landing_zone.mensajes2023 
+PARTITION (fecha = '2023-11-13'); 
